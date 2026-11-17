@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#071b26">
+  <title>Rocket League – Mini-Spiel</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #071b26; color: #f3fbff; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 20px; }
+    main { width: min(100%, 1100px); }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 12px; }
+    h1 { font-size: clamp(1.2rem, 3vw, 1.8rem); margin: 0; }
+    .score { font-size: 1.35rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+    .frame { overflow: hidden; border: 2px solid #264a59; border-radius: 14px; box-shadow: 0 18px 60px #0008; background: #14523e; }
+    canvas { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; touch-action: none; }
+    .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 18px; padding: 12px 2px 0; color: #c1d5dd; font-size: .9rem; }
+    .status { margin-left: auto; color: #9ed7b7; }
+    kbd { border: 1px solid #52717c; border-radius: 5px; background: #122e39; padding: 2px 6px; color: #fff; }
+    button { border: 1px solid #52717c; background: #122e39; color: white; border-radius: 7px; padding: 7px 11px; cursor: pointer; }
+    button:hover { background: #204655; }
+    @media (max-width: 600px) { .status { width: 100%; margin-left: 0; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>⚽ Rocket League – Mini-Spiel</h1>
+      <div class="score" aria-live="polite"><span id="blueScore">0</span> : <span id="orangeScore">0</span></div>
+      <button id="reset">Neustart</button>
+    </header>
+    <div class="frame"><canvas id="game" width="960" height="540" aria-label="Top-Down-Autofußballspiel"></canvas></div>
+    <div class="controls">
+      <span><kbd>W</kbd>/<kbd>↑</kbd> Gas</span><span><kbd>S</kbd>/<kbd>↓</kbd> Rückwärts</span>
+      <span><kbd>A</kbd>/<kbd>D</kbd> Lenken</span><span><kbd>Shift</kbd> Boost</span>
+      <span><kbd>R</kbd> Ball zurücksetzen</span>
+      <span>Controller: linker Stick lenkt · RT/A Gas · LT/B Rückwärts · X/✕ Boost</span>
+      <span class="status" id="padStatus">Controller verbinden oder Taste drücken</span>
+    </div>
+  </main>
+  <script>
+    (() => {
+      const canvas = document.querySelector('#game');
+      const ctx = canvas.getContext('2d');
+      const W = canvas.width, H = canvas.height;
+      const field = { x: 54, y: 38, w: 852, h: 464 };
+      const goalH = 148, goalDepth = 28;
+      const scoreEls = [document.querySelector('#blueScore'), document.querySelector('#orangeScore')];
+      const status = document.querySelector('#padStatus');
+      const keys = new Set();
+      let scores = [0, 0], last = performance.now(), activePad = null;
+      const car = { x: 240, y: H / 2, angle: 0, speed: 0, radius: 22, boost: 100 };
+      const ball = { x: W / 2, y: H / 2, vx: 0, vy: 0, radius: 15 };
+      const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+      function resetPositions() {
+        car.x = 240; car.y = H / 2; car.angle = 0; car.speed = 0;
+        ball.x = W / 2; ball.y = H / 2; ball.vx = 0; ball.vy = 0;
+      }
+      function restart() { scores = [0, 0]; scoreEls.forEach((el, i) => el.textContent = scores[i]); resetPositions(); }
+      document.querySelector('#reset').addEventListener('click', restart);
+      window.addEventListener('keydown', e => {
+        if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) e.preventDefault();
+        keys.add(e.key.toLowerCase());
+        if (e.key.toLowerCase() === 'r') resetPositions();
+      });
+      window.addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
+      window.addEventListener('gamepadconnected', e => { activePad = e.gamepad.index; });
+      window.addEventListener('gamepaddisconnected', e => { if (activePad === e.gamepad.index) activePad = null; });
+
+      function controllerInput() {
+        const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+        let pad = activePad === null ? null : pads[activePad];
+        if (!pad) pad = [...pads].find(Boolean) || null;
+        if (!pad) return { steer: 0, throttle: 0, boost: false, connected: false };
+        activePad = pad.index;
+        const axis = pad.axes[0] || 0;
+        const steer = Math.abs(axis) < 0.14 ? 0 : axis;
+        const button = i => pad.buttons[i]?.pressed || false;
+        // Standard Gamepad mappings: RT is button 7, LT is button 6.
+        const rt = pad.buttons[7]?.value || 0, lt = pad.buttons[6]?.value || 0;
+        const throttle = Math.max(button(0) ? 1 : 0, rt) - Math.max(button(1) ? 1 : 0, lt);
+        return { steer, throttle, boost: button(2) || button(5), connected: true, id: pad.id };
+      }
+
+      function update(dt) {
+        const pad = controllerInput();
+        const steerKeys = (keys.has('a') || keys.has('arrowleft') ? -1 : 0) + (keys.has('d') || keys.has('arrowright') ? 1 : 0);
+        const gasKeys = (keys.has('w') || keys.has('arrowup') ? 1 : 0) - (keys.has('s') || keys.has('arrowdown') ? 1 : 0);
+        const steer = pad.connected && pad.steer !== 0 ? pad.steer : steerKeys;
+        const throttle = pad.connected && pad.throttle !== 0 ? pad.throttle : gasKeys;
+        const boosting = keys.has('shift') || (pad.connected && pad.boost);
+        status.textContent = pad.connected ? `Controller verbunden: ${pad.id}` : 'Controller verbinden oder Taste drücken';
+
+        if (boosting && car.boost > 0 && car.speed > -100) {
+          car.speed += 500 * dt; car.boost = Math.max(0, car.boost - 32 * dt);
+        } else car.boost = Math.min(100, car.boost + 12 * dt);
+        car.speed += throttle * 390 * dt;
+        car.speed *= Math.pow(0.985, dt * 60);
+        car.speed = clamp(car.speed, -190, boosting ? 490 : 360);
+        const steeringPower = 2.8 * clamp(Math.abs(car.speed) / 100, 0.35, 1.15);
+        car.angle += steer * steeringPower * dt * (car.speed < -5 ? -1 : 1);
+        car.x += Math.cos(car.angle) * car.speed * dt;
+        car.y += Math.sin(car.angle) * car.speed * dt;
+
+        // Side walls and end walls (except the goal opening).
+        if (car.y < field.y + car.radius || car.y > field.y + field.h - car.radius) {
+          car.y = clamp(car.y, field.y + car.radius, field.y + field.h - car.radius); car.speed *= -0.45;
+        }
+        if (car.x < field.x + car.radius || car.x > field.x + field.w - car.radius) {
+          car.x = clamp(car.x, field.x + car.radius, field.x + field.w - car.radius); car.speed *= -0.45;
+        }
+
+        ball.x += ball.vx * dt; ball.y += ball.vy * dt;
+        ball.vx *= Math.pow(0.992, dt * 60); ball.vy *= Math.pow(0.992, dt * 60);
+        if (ball.y < field.y + ball.radius || ball.y > field.y + field.h - ball.radius) {
+          ball.y = clamp(ball.y, field.y + ball.radius, field.y + field.h - ball.radius); ball.vy *= -0.82;
+        }
+        const inGoal = Math.abs(ball.y - H / 2) < goalH / 2 - ball.radius;
+        if (ball.x < field.x + ball.radius && !inGoal) { ball.x = field.x + ball.radius; ball.vx *= -0.82; }
+        if (ball.x > field.x + field.w - ball.radius && !inGoal) { ball.x = field.x + field.w - ball.radius; ball.vx *= -0.82; }
+        if (inGoal && ball.x < field.x - goalDepth) { scores[1]++; scoreEls[1].textContent = scores[1]; resetPositions(); }
+        if (inGoal && ball.x > field.x + field.w + goalDepth) { scores[0]++; scoreEls[0].textContent = scores[0]; resetPositions(); }
+
+        const dx = ball.x - car.x, dy = ball.y - car.y, distance = Math.hypot(dx, dy), minDist = ball.radius + car.radius;
+        if (distance < minDist) {
+          const nx = distance ? dx / distance : Math.cos(car.angle), ny = distance ? dy / distance : Math.sin(car.angle);
+          ball.x = car.x + nx * minDist; ball.y = car.y + ny * minDist;
+          const impact = Math.max(120, car.speed * 1.2);
+          ball.vx = nx * impact + Math.cos(car.angle) * Math.max(0, car.speed) * 0.42;
+          ball.vy = ny * impact + Math.sin(car.angle) * Math.max(0, car.speed) * 0.42;
+        }
+      }
+
+      function draw() {
+        ctx.clearRect(0, 0, W, H);
+        ctx.fillStyle = '#14523e'; ctx.fillRect(0, 0, W, H);
+        // Subtle mowing stripes.
+        for (let i = 0; i < 6; i++) { ctx.fillStyle = i % 2 ? '#ffffff08' : '#00000008'; ctx.fillRect(field.x + i * field.w / 6, field.y, field.w / 6, field.h); }
+        ctx.strokeStyle = '#d7f5e8'; ctx.lineWidth = 3;
+        ctx.strokeRect(field.x, field.y, field.w, field.h);
+        ctx.beginPath(); ctx.moveTo(W / 2, field.y); ctx.lineTo(W / 2, field.y + field.h); ctx.stroke();
+        ctx.beginPath(); ctx.arc(W / 2, H / 2, 70, 0, Math.PI * 2); ctx.stroke();
+        ctx.strokeStyle = '#75b9ff'; ctx.strokeRect(field.x - goalDepth, H / 2 - goalH / 2, goalDepth, goalH);
+        ctx.strokeStyle = '#ffae65'; ctx.strokeRect(field.x + field.w, H / 2 - goalH / 2, goalDepth, goalH);
+        // Boost bar
+        ctx.fillStyle = '#0008'; ctx.fillRect(field.x, 12, 144, 14);
+        ctx.fillStyle = '#ffc943'; ctx.fillRect(field.x + 2, 14, 140 * car.boost / 100, 10);
+        ctx.fillStyle = '#fff'; ctx.font = '12px system-ui'; ctx.fillText('BOOST', field.x + 151, 24);
+        // Ball shadow and ball.
+        ctx.fillStyle = '#0005'; ctx.beginPath(); ctx.ellipse(ball.x + 4, ball.y + 7, ball.radius + 3, ball.radius * .7, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#f3f5f6'; ctx.beginPath(); ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = '#63727a'; ctx.lineWidth = 2; ctx.stroke();
+        ctx.fillStyle = '#7b8b91'; ctx.beginPath(); ctx.arc(ball.x, ball.y, 5, 0, Math.PI * 2); ctx.fill();
+        // Car body.
+        ctx.save(); ctx.translate(car.x, car.y); ctx.rotate(car.angle);
+        ctx.fillStyle = '#0005'; ctx.beginPath(); ctx.ellipse(2, 5, 27, 16, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#2095ff'; ctx.strokeStyle = '#c9e8ff'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.roundRect(-24, -14, 48, 28, 8); ctx.fill(); ctx.stroke();
+        ctx.fillStyle = '#bce8ff'; ctx.beginPath(); ctx.roundRect(-7, -10, 17, 20, 5); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.moveTo(20, -7); ctx.lineTo(31, 0); ctx.lineTo(20, 7); ctx.closePath(); ctx.fill();
+        if ((keys.has('shift') || (activePad !== null && controllerInput().boost)) && car.boost > 0) {
+          ctx.fillStyle = '#ffb52e'; ctx.beginPath(); ctx.moveTo(-22, -6); ctx.lineTo(-34 - Math.random() * 8, 0); ctx.lineTo(-22, 6); ctx.fill();
+        }
+        ctx.restore();
+      }
+
+      function frame(now) {
+        const dt = Math.min((now - last) / 1000, 0.04); last = now;
+        update(dt); draw(); requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>
